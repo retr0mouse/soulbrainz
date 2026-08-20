@@ -1,7 +1,7 @@
 {
   description = "ListenBrainz Weekly Jams -> slskd downloader";
 
-  inputs.nixpkgs.url = "github.NixOS/nixpkgs/nixos-unstable";
+  inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
 
   outputs = {
     self,
