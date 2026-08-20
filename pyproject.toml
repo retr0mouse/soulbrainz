@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "soulbrainz"
+version = "0.1.0"
+dependencies = ["requests"]
+
+[project.scripts]
+soulbrainz = "soulbrainz.main:main"
