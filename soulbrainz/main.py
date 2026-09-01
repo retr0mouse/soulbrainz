@@ -44,9 +44,9 @@ def fetch_weekly_jams():
     tracks = resp.json().get("playlist", {}).get("track", [])
 
     return [
-        (t.get("creator", ""), t.get("trackName", ""))
+        (t.get("creator", ""), t.get("title", ""))
         for t in tracks
-        if t.get("trackName")
+        if t.get("title")
     ]
 
 
