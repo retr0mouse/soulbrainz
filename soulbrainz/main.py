@@ -121,6 +121,7 @@ def search_slskd(artist, title):
 
     return []
 
+
 def _ext(filename):
     dot = filename.rfind(".")
     return filename[dot:].lower() if dot != -1 else ""
@@ -148,12 +149,28 @@ def pick_best(files):
 
 def download(file):
     username = file["_username"]
-    requests.post(
+
+    resp = requests.post(
         f"{SLSKD_URL}/api/v0/transfers/downloads/{username}",
-        json={"filename": file["filename"], "size": file.get("size", 0)},
+        json=[
+            {
+                "filename": file["filename"],
+                "size": file["size"],
+            }
+        ],
         headers=_slskd_headers(),
         timeout=10,
-    ).raise_for_status()
+    )
+
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError:
+        log.error(
+            "Download request failed: HTTP %s: %s",
+            resp.status_code,
+            resp.text,
+        )
+        raise
 
 
 def main():
