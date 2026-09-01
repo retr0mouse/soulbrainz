@@ -5,7 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "soulbrainz"
 version = "0.1.0"
-dependencies = ["requests"]
+dependencies = [
+    "requests",
+    "mutagen",
+]
 
 [project.scripts]
 soulbrainz = "soulbrainz.main:main"
