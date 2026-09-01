@@ -7,8 +7,8 @@ import requests
 LB_USERNAME = "reisdro"
 SLSKD_URL = "https://slskd.voldsoy.duckdns.org"
 LB_API = "https://api.listenbrainz.org/1"
-SEARCH_TIMEOUT = 30
-AUDIO_EXTENSIONS = {".flac", "mp3", ".ogg", ".opus", ".m4a"}
+SEARCH_TIMEOUT = 60
+AUDIO_EXTENSIONS = {".flac", ".mp3", ".ogg", ".opus", ".m4a"}
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -51,37 +51,75 @@ def fetch_weekly_jams():
 
 
 def search_slskd(artist, title):
-    """Submit a search to slskd and return the list of file results."""
+    """Submit a search to slskd and return the file results."""
     search_id = str(uuid.uuid4())
     query = f"{artist} {title}".strip()
 
     requests.post(
         f"{SLSKD_URL}/api/v0/searches",
-        json={"id": search_id, "searchText": query},
+        json={
+            "id": search_id,
+            "searchText": query,
+        },
         headers=_slskd_headers(),
         timeout=10,
     ).raise_for_status()
 
     deadline = time.monotonic() + SEARCH_TIMEOUT
+
     while time.monotonic() < deadline:
         time.sleep(2)
+
         resp = requests.get(
             f"{SLSKD_URL}/api/v0/searches/{search_id}",
             headers=_slskd_headers(),
             timeout=10,
         )
         resp.raise_for_status()
-        data = resp.json()
-        if data.get("state") == "Completed":
-            files = []
-            for response in data.get("responses", []):
-                for f in response.get("files", []):
-                    f["_username"] = response["username"]
-                    files.append(f)
-            return files
-    log.warning("Search timed out for %s", query)
-    return []
 
+        data = resp.json()
+
+        if data.get("isComplete"):
+            log.info(
+                "Search completed: %s — %d files from %d users",
+                data.get("state"),
+                data.get("fileCount", 0),
+                data.get("responseCount", 0),
+            )
+
+            # The actual results are on /responses
+            resp = requests.get(
+                f"{SLSKD_URL}/api/v0/searches/{search_id}/responses",
+                headers=_slskd_headers(),
+                timeout=10,
+            )
+            resp.raise_for_status()
+
+            responses = resp.json()
+
+            files = []
+
+            for response in responses:
+                username = response.get("username")
+
+                for file in response.get("files", []):
+                    file["_username"] = username
+                    files.append(file)
+
+            log.info(
+                "Retrieved %d files from %d users",
+                len(files),
+                len(responses),
+            )
+
+            return files
+
+    log.warning(
+        "Search timed out for %s",
+        query,
+    )
+
+    return []
 
 def _ext(filename):
     dot = filename.rfind(".")
