@@ -10,7 +10,7 @@ LB_API = "https://api.listenbrainz.org/1"
 SEARCH_TIMEOUT = 30
 AUDIO_EXTENSIONS = {".flac", "mp3", ".ogg", ".opus", ".m4a"}
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s $(message)s")
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
 
@@ -39,11 +39,14 @@ def fetch_weekly_jams():
     log.info("Fetching playlist %s", mbid)
 
     resp = requests.get(f"{LB_API}/playlist/{mbid}", timeout=15)
-    resp.raise_for_status
+    resp.raise_for_status()
 
     tracks = resp.json().get("playlist", {}).get("track", [])
+
     return [
-        (t.get("creator", ""), t.get("title", "")) for t in tracks if t.get("title")
+        (t.get("creator", ""), t.get("trackName", ""))
+        for t in tracks
+        if t.get("trackName")
     ]
 
 
@@ -75,7 +78,7 @@ def search_slskd(artist, title):
                 for f in response.get("files", []):
                     f["_username"] = response["username"]
                     files.append(f)
-                return files
+            return files
     log.warning("Search timed out for %s", query)
     return []
 
