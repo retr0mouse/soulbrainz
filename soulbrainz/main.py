@@ -98,26 +98,26 @@ def get_weekly_jams():
     weekly_jams = None
 
     for playlist in playlists:
-        title = playlist.get("title", "").lower()
+        title = playlist.get("playlist").get("title")
 
-        if title == "weekly jams":
+        if f"Weekly Jams for {LISTENBRAINZ_USER}" in title:
             weekly_jams = playlist
             break
 
     if not weekly_jams:
         raise RuntimeError("Could not find Weekly Jams playlist")
 
-    playlist_mbid = weekly_jams.get("playlist_mbid")
+    mbid = weekly_jams["playlist"]["identifier"].rstrip("/").split("/")[-1]
 
-    if not playlist_mbid:
-        raise RuntimeError("Weekly Jams playlist has no playlist_mbid")
+    if not mbid:
+        raise RuntimeError("Weekly Jams playlist has no mbid")
 
     log.info(
         "Found Weekly Jams playlist: %s",
-        playlist_mbid,
+        mbid,
     )
 
-    playlist_url = f"{LISTENBRAINZ_URL}/playlist/{playlist_mbid}"
+    playlist_url = f"{LISTENBRAINZ_URL}/playlist/{mbid}"
 
     resp = requests.get(playlist_url, timeout=20)
     resp.raise_for_status()
@@ -861,16 +861,6 @@ def process_track(track, library_index):
 
 def main():
     log.info("Starting soulbrainz")
-
-    MUSIC_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    DOWNLOAD_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
 
     # -----------------------------------------------------------------------
     # Build the library index once.
