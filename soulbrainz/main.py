@@ -98,7 +98,8 @@ def get_weekly_jams():
     weekly_jams = None
 
     for playlist in playlists:
-        title = playlist.get("playlist").get("title")
+        playlist = playlist["playlist"]
+        title = playlist["title"]
 
         if f"Weekly Jams for {LISTENBRAINZ_USER}" in title:
             weekly_jams = playlist
@@ -107,7 +108,7 @@ def get_weekly_jams():
     if not weekly_jams:
         raise RuntimeError("Could not find Weekly Jams playlist")
 
-    mbid = weekly_jams["playlist"]["identifier"].rstrip("/").split("/")[-1]
+    mbid = weekly_jams["identifier"].rstrip("/").split("/")[-1]
 
     if not mbid:
         raise RuntimeError("Weekly Jams playlist has no mbid")
@@ -131,7 +132,7 @@ def get_weekly_jams():
 
     for track in tracks:
         artist = track.get("creator")
-        title = track.get("trackName")
+        title = track.get("title")
 
         if not artist or not title:
             continue
