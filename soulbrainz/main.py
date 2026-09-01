@@ -28,7 +28,7 @@ def fetch_weekly_jams():
     playlists = resp.json().get("playlists", [])
 
     weekly = next(
-        (p for p in playlists if "Weekly Jams" in p["playlists"].get("title", "")),
+        (p for p in playlists if "Weekly Jams" in p["playlist"].get("title", "")),
         None,
     )
     if weekly is None:
