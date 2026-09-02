@@ -88,7 +88,10 @@ def get_weekly_jams():
         f"{LISTENBRAINZ_USER}/playlists/createdfor"
     )
 
-    resp = requests.get(url, timeout=20)
+    resp = requests.get(
+        url,
+        timeout=20,
+    )
     resp.raise_for_status()
 
     data = resp.json()
@@ -106,21 +109,34 @@ def get_weekly_jams():
             break
 
     if not weekly_jams:
-        raise RuntimeError("Could not find Weekly Jams playlist")
+        raise RuntimeError(
+            "Could not find Weekly Jams playlist"
+        )
 
-    mbid = weekly_jams["identifier"].rstrip("/").split("/")[-1]
+    mbid = (
+        weekly_jams["identifier"]
+        .rstrip("/")
+        .split("/")[-1]
+    )
 
     if not mbid:
-        raise RuntimeError("Weekly Jams playlist has no mbid")
+        raise RuntimeError(
+            "Weekly Jams playlist has no mbid"
+        )
 
     log.info(
         "Found Weekly Jams playlist: %s",
         mbid,
     )
 
-    playlist_url = f"{LISTENBRAINZ_URL}/playlist/{mbid}"
+    playlist_url = (
+        f"{LISTENBRAINZ_URL}/playlist/{mbid}"
+    )
 
-    resp = requests.get(playlist_url, timeout=20)
+    resp = requests.get(
+        playlist_url,
+        timeout=20,
+    )
     resp.raise_for_status()
 
     data = resp.json()
@@ -137,23 +153,37 @@ def get_weekly_jams():
         if not artist or not title:
             continue
 
-        result.append({
-            "artist": artist.strip(),
-            "title": title.strip(),
-        })
+        result.append(
+            {
+                "artist": artist.strip(),
+                "title": title.strip(),
+            }
+        )
 
-    log.info("Found %d tracks", len(result))
+    log.info(
+        "Found %d tracks",
+        len(result),
+    )
 
     return result[:RECOMMENDATION_COUNT]
 
 
 # ---------------------------------------------------------------------------
-# Music library
+# Metadata normalization
 # ---------------------------------------------------------------------------
 
 def _normalise_metadata(value):
     """
-    Normalize metadata sufficiently for duplicate detection.
+    Normalize metadata for duplicate and track matching.
+
+    This removes punctuation and normalizes whitespace/case so that
+    superficial differences such as:
+
+        System of a Down
+        System Of A Down
+        System-of-a-Down
+
+    can be compared reliably.
     """
 
     if not value:
@@ -161,17 +191,57 @@ def _normalise_metadata(value):
 
     value = str(value).strip().lower()
 
-    # Normalize Unicode-ish punctuation commonly encountered in tags.
+    value = value.replace("&", " and ")
+
+    # Normalize common Unicode punctuation.
     value = value.replace("’", "'")
     value = value.replace("‘", "'")
     value = value.replace("–", "-")
     value = value.replace("—", "-")
 
+    # Remove punctuation.
+    value = re.sub(
+        r"[^\w\s]",
+        " ",
+        value,
+        flags=re.UNICODE,
+    )
+
     # Collapse whitespace.
-    value = re.sub(r"\s+", " ", value)
+    value = re.sub(
+        r"\s+",
+        " ",
+        value,
+    )
+
+    return value.strip()
+
+
+def _normalise_track_title(value):
+    """
+    Normalize a track title for Soulseek result comparison.
+
+    Also removes common featuring separators.
+    """
+
+    value = _normalise_metadata(value)
+
+    value = value.replace(
+        " feat ",
+        " ",
+    )
+
+    value = value.replace(
+        " ft ",
+        " ",
+    )
 
     return value
 
+
+# ---------------------------------------------------------------------------
+# Audio metadata
+# ---------------------------------------------------------------------------
 
 def _first_tag(audio, *keys):
     """
@@ -190,6 +260,7 @@ def _first_tag(audio, *keys):
         if isinstance(value, list):
             if not value:
                 continue
+
             value = value[0]
 
         return str(value)
@@ -206,7 +277,10 @@ def read_audio_metadata(path):
     """
 
     try:
-        audio = MutagenFile(path, easy=True)
+        audio = MutagenFile(
+            path,
+            easy=True,
+        )
 
         if audio is None:
             return None
@@ -240,23 +314,59 @@ def read_audio_metadata(path):
         return None
 
 
+# ---------------------------------------------------------------------------
+# Music library
+# ---------------------------------------------------------------------------
+
+def _extract_library_title(filename):
+    """
+    Extract a track title from the standardized library filename.
+
+    Examples:
+
+        01. Toxicity.flac       -> Toxicity
+        07 - Everlong.mp3       -> Everlong
+        03_some song.flac       -> some song
+    """
+
+    name = Path(filename).stem
+
+    # Remove leading track number.
+    name = re.sub(
+        r"^\s*\d{1,2}[\s._-]+",
+        "",
+        name,
+    )
+
+    return name.strip()
+
+
 def build_library_index():
     """
     Scan /data/music and build a set of (artist, title) pairs.
 
-    Metadata is used instead of filenames because the existing library
-    contains several different filename conventions.
+    Metadata is preferred. The standardized directory/filename layout is
+    also indexed as a fallback for files with missing or bad metadata.
     """
 
-    log.info("Scanning music library: %s", MUSIC_DIR)
+    log.info(
+        "Scanning music library: %s",
+        MUSIC_DIR,
+    )
 
     index = set()
 
     if not MUSIC_DIR.exists():
-        log.warning("Music directory does not exist: %s", MUSIC_DIR)
+        log.warning(
+            "Music directory does not exist: %s",
+            MUSIC_DIR,
+        )
+
         return index
 
     file_count = 0
+    metadata_count = 0
+    path_fallback_count = 0
 
     for path in MUSIC_DIR.rglob("*"):
         if not path.is_file():
@@ -267,15 +377,43 @@ def build_library_index():
 
         file_count += 1
 
+        # ---------------------------------------------------------------
+        # Preferred: actual audio metadata.
+        # ---------------------------------------------------------------
+
         metadata = read_audio_metadata(path)
 
         if metadata:
             index.add(metadata)
+            metadata_count += 1
+
+        # ---------------------------------------------------------------
+        # Fallback: /data/music/<Artist>/<track number>. <Title>.ext
+        # ---------------------------------------------------------------
+
+        if path.parent != MUSIC_DIR:
+            artist = path.parent.name
+            title = _extract_library_title(
+                path.name
+            )
+
+            if artist and title:
+                index.add(
+                    (
+                        _normalise_metadata(artist),
+                        _normalise_metadata(title),
+                    )
+                )
+
+                path_fallback_count += 1
 
     log.info(
-        "Indexed %d audio files, %d unique artist/title pairs",
+        "Indexed %d audio files, %d unique artist/title pairs "
+        "(%d metadata, %d path fallback)",
         file_count,
         len(index),
+        metadata_count,
+        path_fallback_count,
     )
 
     return index
@@ -310,7 +448,10 @@ def search_slskd(artist, title):
     search_id = str(uuid.uuid4())
     query = f"{artist} {title}".strip()
 
-    log.info("Searching Soulseek: %s", query)
+    log.info(
+        "Searching Soulseek: %s",
+        query,
+    )
 
     resp = requests.post(
         f"{SLSKD_URL}/api/v0/searches",
@@ -324,7 +465,10 @@ def search_slskd(artist, title):
 
     resp.raise_for_status()
 
-    deadline = time.monotonic() + SEARCH_TIMEOUT
+    deadline = (
+            time.monotonic()
+            + SEARCH_TIMEOUT
+    )
 
     while time.monotonic() < deadline:
         time.sleep(2)
@@ -348,7 +492,8 @@ def search_slskd(artist, title):
             )
 
             resp = requests.get(
-                f"{SLSKD_URL}/api/v0/searches/{search_id}/responses",
+                f"{SLSKD_URL}/api/v0/searches/"
+                f"{search_id}/responses",
                 headers=_slskd_headers(),
                 timeout=10,
             )
@@ -382,6 +527,95 @@ def search_slskd(artist, title):
     return []
 
 
+def _extract_filename_title(filename):
+    """
+    Try to extract the actual track title from a Soulseek filename.
+
+    Handles common patterns such as:
+
+        01 - Toxicity.flac
+        01. Toxicity.flac
+        System Of A Down - Toxicity.flac
+        System Of A Down - Toxicity - 01 - Toxicity.flac
+    """
+
+    name = Path(filename).stem
+
+    # Remove leading track number.
+    name = re.sub(
+        r"^\s*\d{1,2}[\s._-]+",
+        "",
+        name,
+    )
+
+    return name.strip()
+
+
+def _result_matches_track(file, artist, title):
+    """
+    Determine whether a Soulseek result plausibly represents the
+    requested artist/title.
+    """
+
+    filename = file.get(
+        "filename",
+        "",
+    )
+
+    if _ext(filename) not in AUDIO_EXTENSIONS:
+        return False
+
+    if file.get("isLocked", False):
+        return False
+
+    requested_artist = _normalise_metadata(
+        artist
+    )
+
+    requested_title = _normalise_track_title(
+        title
+    )
+
+    filename_normalized = _normalise_metadata(
+        filename
+    )
+
+    title_normalized = _normalise_track_title(
+        _extract_filename_title(filename)
+    )
+
+    # ---------------------------------------------------------------
+    # Exact extracted title match.
+    # ---------------------------------------------------------------
+
+    if title_normalized == requested_title:
+        return True
+
+    # ---------------------------------------------------------------
+    # Requested title appears somewhere in the filename/path.
+    # ---------------------------------------------------------------
+
+    if (
+            requested_title
+            and requested_title in filename_normalized
+    ):
+        return True
+
+    # ---------------------------------------------------------------
+    # Artist + title both appear in the path.
+    # ---------------------------------------------------------------
+
+    if (
+            requested_artist
+            and requested_title
+            and requested_artist in filename_normalized
+            and requested_title in filename_normalized
+    ):
+        return True
+
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Search result selection
 # ---------------------------------------------------------------------------
@@ -391,19 +625,25 @@ def _rank(file):
     Lower is better.
 
     Priority:
+
         0 = FLAC
         1 = MP3 >= 320 kbps
         2 = MP3 < 320 kbps
         3 = other supported audio
     """
 
-    ext = _ext(file["filename"])
+    ext = _ext(
+        file["filename"]
+    )
 
     if ext == ".flac":
         return 0
 
     if ext == ".mp3":
-        bitrate = file.get("bitRate", 0) or 0
+        bitrate = (
+                file.get("bitRate", 0)
+                or 0
+        )
 
         if bitrate >= 320:
             return 1
@@ -416,22 +656,42 @@ def _rank(file):
     return 99
 
 
-def pick_best(files):
+def pick_best(files, artist, title):
     """
-    Pick the best usable audio file from Soulseek results.
+    Pick the best usable Soulseek result that actually matches
+    the requested track.
     """
 
-    audio = [
+    matching = [
         file
         for file in files
-        if _ext(file.get("filename", "")) in AUDIO_EXTENSIONS
-           and not file.get("isLocked", False)
+        if _result_matches_track(
+            file,
+            artist,
+            title,
+        )
     ]
 
-    if not audio:
+    if not matching:
+        log.warning(
+            "No matching Soulseek result for: %s — %s",
+            artist,
+            title,
+        )
+
         return None
 
-    return sorted(audio, key=_rank)[0]
+    log.info(
+        "Found %d matching results for %s — %s",
+        len(matching),
+        artist,
+        title,
+    )
+
+    return sorted(
+        matching,
+        key=_rank,
+    )[0]
 
 
 # ---------------------------------------------------------------------------
@@ -445,11 +705,12 @@ def sanitize_filename(value):
 
     value = value.strip()
 
-    # Replace characters that are problematic or commonly illegal
-    # in cross-platform music filenames.
-    value = re.sub(r"[\/\\:*?\"<>|]", "_", value)
+    value = re.sub(
+        r"[\/\\:*?\"<>|]",
+        "_",
+        value,
+    )
 
-    # Avoid accidental whitespace at the end.
     value = value.rstrip(" .")
 
     if not value:
@@ -481,10 +742,15 @@ def extract_track_number(filename):
     ]
 
     for pattern in patterns:
-        match = re.search(pattern, name)
+        match = re.search(
+            pattern,
+            name,
+        )
 
         if match:
-            number = int(match.group(1))
+            number = int(
+                match.group(1)
+            )
 
             if 1 <= number <= 99:
                 return f"{number:02d}"
@@ -492,25 +758,45 @@ def extract_track_number(filename):
     return None
 
 
-def build_destination(artist, title, source_filename):
+def build_destination(
+        artist,
+        title,
+        source_filename,
+):
     """
     Build:
 
         /data/music/<Artist>/<NN>. <Title>.<ext>
     """
 
-    artist_dir = MUSIC_DIR / sanitize_filename(artist)
+    artist_dir = (
+            MUSIC_DIR
+            / sanitize_filename(artist)
+    )
 
-    extension = _ext(source_filename)
+    extension = _ext(
+        source_filename
+    )
 
-    track_number = extract_track_number(source_filename)
+    track_number = extract_track_number(
+        source_filename
+    )
 
-    safe_title = sanitize_filename(title)
+    safe_title = sanitize_filename(
+        title
+    )
 
     if track_number:
-        filename = f"{track_number}. {safe_title}{extension}"
+        filename = (
+            f"{track_number}. "
+            f"{safe_title}"
+            f"{extension}"
+        )
     else:
-        filename = f"{safe_title}{extension}"
+        filename = (
+            f"{safe_title}"
+            f"{extension}"
+        )
 
     return artist_dir / filename
 
@@ -544,15 +830,27 @@ def queue_download(file):
     The API expects a LIST of QueueDownloadRequest objects.
     """
 
-    username = file.get("_username")
-    filename = file.get("filename")
-    size = file.get("size")
+    username = file.get(
+        "_username"
+    )
+
+    filename = file.get(
+        "filename"
+    )
+
+    size = file.get(
+        "size"
+    )
 
     if not username:
-        raise RuntimeError("Search result has no username")
+        raise RuntimeError(
+            "Search result has no username"
+        )
 
     if not filename:
-        raise RuntimeError("Search result has no filename")
+        raise RuntimeError(
+            "Search result has no filename"
+        )
 
     log.info(
         "Queuing download: %s from %s",
@@ -561,7 +859,8 @@ def queue_download(file):
     )
 
     resp = requests.post(
-        f"{SLSKD_URL}/api/v0/transfers/downloads/{username}",
+        f"{SLSKD_URL}/api/v0/transfers/"
+        f"downloads/{username}",
         json=[
             {
                 "filename": filename,
@@ -589,7 +888,14 @@ def _filename_matches(path, remote_filename):
     slskd may transform path separators but should preserve the basename.
     """
 
-    return path.name == Path(remote_filename.replace("\\", "/")).name
+    remote_basename = Path(
+        remote_filename.replace(
+            "\\",
+            "/",
+        )
+    ).name
+
+    return path.name == remote_basename
 
 
 def wait_for_download(
@@ -602,14 +908,16 @@ def wait_for_download(
     directory.
 
     We intentionally use the filesystem rather than relying on slskd's
-    transfer-state JSON, because the latter varies between slskd versions
-    and configurations.
+    transfer-state JSON.
     """
 
     remote_filename = file["filename"]
     expected_size = file.get("size")
 
-    deadline = time.monotonic() + timeout
+    deadline = (
+            time.monotonic()
+            + timeout
+    )
 
     log.info(
         "Waiting for download: %s",
@@ -630,7 +938,10 @@ def wait_for_download(
             if path in previous_files:
                 continue
 
-            if not _filename_matches(path, remote_filename):
+            if not _filename_matches(
+                    path,
+                    remote_filename,
+            ):
                 continue
 
             candidates.append(path)
@@ -655,8 +966,71 @@ def wait_for_download(
         time.sleep(2)
 
     raise TimeoutError(
-        f"Timed out waiting for download: {remote_filename}"
+        f"Timed out waiting for download: "
+        f"{remote_filename}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Download verification
+# ---------------------------------------------------------------------------
+
+def verify_downloaded_file(
+        path,
+        artist,
+        title,
+):
+    """
+    Verify that the downloaded audio file's metadata matches the
+    requested artist/title.
+
+    If metadata is unavailable, allow the file through because the
+    filename was already validated during Soulseek result selection.
+    """
+
+    metadata = read_audio_metadata(
+        path
+    )
+
+    if metadata is None:
+        log.warning(
+            "Downloaded file has no readable metadata: %s",
+            path,
+        )
+
+        return True
+
+    actual_artist, actual_title = metadata
+
+    expected_artist = _normalise_metadata(
+        artist
+    )
+
+    expected_title = _normalise_metadata(
+        title
+    )
+
+    if actual_artist != expected_artist:
+        log.error(
+            "Downloaded artist mismatch: expected %r, got %r: %s",
+            expected_artist,
+            actual_artist,
+            path,
+        )
+
+        return False
+
+    if actual_title != expected_title:
+        log.error(
+            "Downloaded title mismatch: expected %r, got %r: %s",
+            expected_title,
+            actual_title,
+            path,
+        )
+
+        return False
+
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -688,6 +1062,7 @@ def import_download(
             "Destination already exists, skipping import: %s",
             destination,
         )
+
         return False
 
     log.info(
@@ -701,8 +1076,9 @@ def import_download(
         str(destination),
     )
 
-    # Try to remove empty directories left behind by slskd.
-    cleanup_empty_parents(source.parent)
+    cleanup_empty_parents(
+        source.parent
+    )
 
     return True
 
@@ -714,7 +1090,10 @@ def cleanup_empty_parents(directory):
 
     directory = Path(directory)
 
-    while directory != DOWNLOAD_DIR and DOWNLOAD_DIR in directory.parents:
+    while (
+            directory != DOWNLOAD_DIR
+            and DOWNLOAD_DIR in directory.parents
+    ):
         try:
             directory.rmdir()
         except OSError:
@@ -727,7 +1106,10 @@ def cleanup_empty_parents(directory):
 # Track processing
 # ---------------------------------------------------------------------------
 
-def process_track(track, library_index):
+def process_track(
+        track,
+        library_index,
+):
     artist = track["artist"]
     title = track["title"]
 
@@ -751,6 +1133,7 @@ def process_track(track, library_index):
             artist,
             title,
         )
+
         return False
 
     # -----------------------------------------------------------------------
@@ -768,13 +1151,18 @@ def process_track(track, library_index):
             artist,
             title,
         )
+
         return False
 
     # -----------------------------------------------------------------------
     # 3. Select the best result.
     # -----------------------------------------------------------------------
 
-    selected = pick_best(files)
+    selected = pick_best(
+        files,
+        artist,
+        title,
+    )
 
     if not selected:
         log.warning(
@@ -782,6 +1170,7 @@ def process_track(track, library_index):
             artist,
             title,
         )
+
         return False
 
     log.info(
@@ -790,15 +1179,22 @@ def process_track(track, library_index):
         selected.get("_username"),
     )
 
-    extension = _ext(selected["filename"])
+    extension = _ext(
+        selected["filename"]
+    )
 
     if extension == ".flac":
-        log.info("Selected quality: FLAC")
+        log.info(
+            "Selected quality: FLAC"
+        )
 
     elif extension == ".mp3":
         log.info(
             "Selected quality: MP3 %s kbps",
-            selected.get("bitRate", "?"),
+            selected.get(
+                "bitRate",
+                "?",
+            ),
         )
 
     else:
@@ -817,7 +1213,9 @@ def process_track(track, library_index):
     # 5. Queue download.
     # -----------------------------------------------------------------------
 
-    queue_download(selected)
+    queue_download(
+        selected
+    )
 
     # -----------------------------------------------------------------------
     # 6. Wait for the actual file to appear.
@@ -829,8 +1227,25 @@ def process_track(track, library_index):
             previous_files,
         )
 
+        if not verify_downloaded_file(
+                completed_file,
+                artist,
+                title,
+        ):
+            log.error(
+                "Downloaded file failed metadata verification, "
+                "leaving it in the slskd completed directory: %s",
+                completed_file,
+            )
+
+            return False
+
     except TimeoutError as exc:
-        log.error("%s", exc)
+        log.error(
+            "%s",
+            exc,
+        )
+
         return False
 
     # -----------------------------------------------------------------------
@@ -861,7 +1276,9 @@ def process_track(track, library_index):
 # ---------------------------------------------------------------------------
 
 def main():
-    log.info("Starting soulbrainz")
+    log.info(
+        "Starting soulbrainz"
+    )
 
     # -----------------------------------------------------------------------
     # Build the library index once.
@@ -876,7 +1293,10 @@ def main():
     tracks = get_weekly_jams()
 
     if not tracks:
-        log.info("No tracks to process")
+        log.info(
+            "No tracks to process"
+        )
+
         return
 
     downloaded = 0
