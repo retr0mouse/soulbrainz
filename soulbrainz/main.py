@@ -31,8 +31,6 @@ DOWNLOAD_DIR = Path("/data/downloads/slskd/complete")
 SEARCH_TIMEOUT = 60
 DOWNLOAD_TIMEOUT = 300
 
-RECOMMENDATION_COUNT = 5
-
 AUDIO_EXTENSIONS = {
     ".flac",
     ".mp3",
@@ -165,7 +163,7 @@ def get_weekly_jams():
         len(result),
     )
 
-    return result[:RECOMMENDATION_COUNT]
+    return result
 
 
 # ---------------------------------------------------------------------------
