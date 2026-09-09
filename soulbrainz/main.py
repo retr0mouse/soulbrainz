@@ -98,8 +98,8 @@ def get_weekly_jams():
 
     weekly_jams = None
 
-    for playlist in playlists:
-        playlist = playlist["playlist"]
+    for playlist_entry in playlists:
+        playlist = playlist_entry["playlist"]
         title = playlist["title"]
 
         if f"Weekly Jams for {LISTENBRAINZ_USER}" in title:
@@ -174,14 +174,13 @@ def _normalise_metadata(value):
     """
     Normalize metadata for duplicate and track matching.
 
-    This removes punctuation and normalizes whitespace/case so that
-    superficial differences such as:
+    Examples:
 
         System of a Down
         System Of A Down
         System-of-a-Down
 
-    can be compared reliably.
+    all become comparable.
     """
 
     if not value:
@@ -196,6 +195,8 @@ def _normalise_metadata(value):
     value = value.replace("‘", "'")
     value = value.replace("–", "-")
     value = value.replace("—", "-")
+    value = value.replace("‐", "-")
+    value = value.replace("-", "-")
 
     # Remove punctuation.
     value = re.sub(
@@ -217,24 +218,64 @@ def _normalise_metadata(value):
 
 def _normalise_track_title(value):
     """
-    Normalize a track title for Soulseek result comparison.
+    Normalize a track title.
 
-    Also removes common featuring separators.
+    Featuring information is not stripped here because it can legitimately
+    be part of a title. Artist feature handling belongs in artist matching.
+    """
+
+    return _normalise_metadata(value)
+
+
+def _normalise_artist_for_matching(value):
+    """
+    Normalize an artist name for matching.
+
+    Common featured-artist suffixes are removed.
+
+    Examples:
+
+        Kid Cudi
+        Kid Cudi feat. CeeLo Green
+        Kid Cudi ft CeeLo Green
+        Kid Cudi featuring CeeLo Green
+
+    all normalize to:
+
+        kid cudi
     """
 
     value = _normalise_metadata(value)
 
-    value = value.replace(
-        " feat ",
-        " ",
+    # Remove everything starting with a common featuring separator.
+    value = re.split(
+        r"\b(?:feat|ft|featuring)\b",
+        value,
+        maxsplit=1,
+    )[0]
+
+    return value.strip()
+
+
+def _artist_matches(expected, actual):
+    """
+    Compare artist names while allowing common featured-artist notation.
+    """
+
+    expected_normalized = _normalise_artist_for_matching(
+        expected
     )
 
-    value = value.replace(
-        " ft ",
-        " ",
+    actual_normalized = _normalise_artist_for_matching(
+        actual
     )
 
-    return value
+    if not expected_normalized or not actual_normalized:
+        return False
+
+    return (
+        expected_normalized == actual_normalized
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +309,7 @@ def _first_tag(audio, *keys):
 
 def read_audio_metadata(path):
     """
-    Return normalized artist/title metadata from an audio file.
+    Return raw artist/title metadata from an audio file.
 
     Returns:
         tuple[str, str] | None
@@ -286,8 +327,13 @@ def read_audio_metadata(path):
         artist = _first_tag(
             audio,
             "artist",
-            "albumartist",
         )
+
+        if not artist:
+            artist = _first_tag(
+                audio,
+                "albumartist",
+            )
 
         title = _first_tag(
             audio,
@@ -298,8 +344,8 @@ def read_audio_metadata(path):
             return None
 
         return (
-            _normalise_metadata(artist),
-            _normalise_metadata(title),
+            artist,
+            title,
         )
 
     except Exception as exc:
@@ -329,7 +375,6 @@ def _extract_library_title(filename):
 
     name = Path(filename).stem
 
-    # Remove leading track number.
     name = re.sub(
         r"^\s*\d{1,2}[\s._-]+",
         "",
@@ -344,7 +389,7 @@ def build_library_index():
     Scan /data/music and build a set of (artist, title) pairs.
 
     Metadata is preferred. The standardized directory/filename layout is
-    also indexed as a fallback for files with missing or bad metadata.
+    also indexed as a fallback.
     """
 
     log.info(
@@ -375,31 +420,29 @@ def build_library_index():
 
         file_count += 1
 
-        # ---------------------------------------------------------------
-        # Preferred: actual audio metadata.
-        # ---------------------------------------------------------------
-
         metadata = read_audio_metadata(path)
 
         if metadata:
-            index.add(metadata)
-            metadata_count += 1
+            artist, title = metadata
 
-        # ---------------------------------------------------------------
-        # Fallback: /data/music/<Artist>/<track number>. <Title>.ext
-        # ---------------------------------------------------------------
+            index.add(
+                (
+                    _normalise_artist_for_matching(artist),
+                    _normalise_track_title(title),
+                )
+            )
+
+            metadata_count += 1
 
         if path.parent != MUSIC_DIR:
             artist = path.parent.name
-            title = _extract_library_title(
-                path.name
-            )
+            title = _extract_library_title(path.name)
 
             if artist and title:
                 index.add(
                     (
-                        _normalise_metadata(artist),
-                        _normalise_metadata(title),
+                        _normalise_artist_for_matching(artist),
+                        _normalise_track_title(title),
                     )
                 )
 
@@ -419,8 +462,8 @@ def build_library_index():
 
 def track_exists(library_index, artist, title):
     key = (
-        _normalise_metadata(artist),
-        _normalise_metadata(title),
+        _normalise_artist_for_matching(artist),
+        _normalise_track_title(title),
     )
 
     return key in library_index
@@ -431,10 +474,6 @@ def track_exists(library_index, artist, title):
 # ---------------------------------------------------------------------------
 
 def _ext(filename):
-    """
-    Return a lowercase extension including the dot.
-    """
-
     return Path(filename).suffix.lower()
 
 
@@ -464,8 +503,8 @@ def search_slskd(artist, title):
     resp.raise_for_status()
 
     deadline = (
-            time.monotonic()
-            + SEARCH_TIMEOUT
+        time.monotonic()
+        + SEARCH_TIMEOUT
     )
 
     while time.monotonic() < deadline:
@@ -525,34 +564,115 @@ def search_slskd(artist, title):
     return []
 
 
+# ---------------------------------------------------------------------------
+# Soulseek result matching
+# ---------------------------------------------------------------------------
+
+def _strip_track_number(value):
+    """
+    Remove a leading track number.
+
+    Examples:
+
+        01 - Toxicity       -> Toxicity
+        01. Toxicity        -> Toxicity
+        7_Toxicity          -> Toxicity
+    """
+
+    return re.sub(
+        r"^\s*\d{1,3}[\s._-]+",
+        "",
+        value,
+    ).strip()
+
+
 def _extract_filename_title(filename):
     """
-    Try to extract the actual track title from a Soulseek filename.
+    Extract the most likely track title from the filename.
 
-    Handles common patterns such as:
+    This intentionally does NOT consider the parent directory or album
+    name to be the track title.
+
+    Examples:
 
         01 - Toxicity.flac
-        01. Toxicity.flac
+            -> Toxicity
+
         System Of A Down - Toxicity.flac
-        System Of A Down - Toxicity - 01 - Toxicity.flac
+            -> Toxicity
+
+        Foo - Everlong - 01 - Everlong.flac
+            -> Everlong
     """
 
-    name = Path(filename).stem
+    name = Path(filename).stem.strip()
 
-    # Remove leading track number.
-    name = re.sub(
-        r"^\s*\d{1,2}[\s._-]+",
-        "",
-        name,
+    # First remove a leading track number.
+    name = _strip_track_number(name)
+
+    # If the filename contains a conventional "Artist - Title" format,
+    # use the final component as the likely title.
+    parts = [
+        part.strip()
+        for part in re.split(r"\s+-\s+", name)
+        if part.strip()
+    ]
+
+    if len(parts) >= 2:
+        name = parts[-1]
+
+        # A trailing track number may still exist.
+        name = re.sub(
+            r"\s*[-._ ]+\s*\d{1,3}$",
+            "",
+            name,
+        ).strip()
+
+    return name
+
+
+def _filename_components(filename):
+    """
+    Return useful normalized components from a Soulseek filename/path.
+
+    We intentionally inspect the basename for title matching and the
+    complete path only for supplementary artist matching.
+    """
+
+    path_normalized = _normalise_metadata(
+        filename
     )
 
-    return name.strip()
+    basename = Path(
+        filename.replace("\\", "/")
+    ).name
+
+    extracted_title = _extract_filename_title(
+        basename
+    )
+
+    return (
+        path_normalized,
+        _normalise_track_title(extracted_title),
+    )
 
 
 def _result_matches_track(file, artist, title):
     """
-    Determine whether a Soulseek result plausibly represents the
-    requested artist/title.
+    Determine whether a Soulseek result actually represents the requested
+    artist/title.
+
+    IMPORTANT:
+        Album/directory names are NOT treated as track titles.
+
+    This prevents:
+
+        Hail to the King/
+            01 - Shepherd of Fire.flac
+
+    from being selected for:
+
+        Avenged Sevenfold — Hail to the King
     """
 
     filename = file.get(
@@ -566,7 +686,7 @@ def _result_matches_track(file, artist, title):
     if file.get("isLocked", False):
         return False
 
-    requested_artist = _normalise_metadata(
+    requested_artist = _normalise_artist_for_matching(
         artist
     )
 
@@ -574,42 +694,66 @@ def _result_matches_track(file, artist, title):
         title
     )
 
-    filename_normalized = _normalise_metadata(
-        filename
-    )
-
-    title_normalized = _normalise_track_title(
-        _extract_filename_title(filename)
+    path_normalized, filename_title = (
+        _filename_components(filename)
     )
 
     # ---------------------------------------------------------------
-    # Exact extracted title match.
+    # 1. Exact filename-derived title.
+    #
+    # This is the strongest result when metadata isn't available.
     # ---------------------------------------------------------------
 
-    if title_normalized == requested_title:
+    if filename_title == requested_title:
         return True
 
     # ---------------------------------------------------------------
-    # Requested title appears somewhere in the filename/path.
+    # 2. Conventional "Artist - Title" filename.
+    #
+    # The extracted title is already checked above. This branch mainly
+    # documents the intended behavior and makes the matching explicit.
     # ---------------------------------------------------------------
 
-    if (
-            requested_title
-            and requested_title in filename_normalized
-    ):
-        return True
+    filename_without_number = _strip_track_number(
+        Path(filename.replace("\\", "/")).stem
+    )
+
+    parts = [
+        part.strip()
+        for part in re.split(
+            r"\s+-\s+",
+            filename_without_number,
+        )
+        if part.strip()
+    ]
+
+    if len(parts) >= 2:
+        filename_artist = _normalise_artist_for_matching(
+            parts[-2]
+        )
+
+        filename_title_candidate = _normalise_track_title(
+            parts[-1]
+        )
+
+        if (
+            filename_title_candidate == requested_title
+            and _artist_matches(
+                requested_artist,
+                filename_artist,
+            )
+        ):
+            return True
 
     # ---------------------------------------------------------------
-    # Artist + title both appear in the path.
+    # 3. Do NOT accept merely because the title appears in the path.
+    #
+    # This is the bug that allowed:
+    #
+    #   Hail to the King/Shepherd of Fire.flac
+    #
+    # to pass.
     # ---------------------------------------------------------------
-
-    if (
-            requested_artist
-            and requested_title
-            and requested_artist in filename_normalized
-            and requested_title in filename_normalized
-    ):
-        return True
 
     return False
 
@@ -639,8 +783,8 @@ def _rank(file):
 
     if ext == ".mp3":
         bitrate = (
-                file.get("bitRate", 0)
-                or 0
+            file.get("bitRate", 0)
+            or 0
         )
 
         if bitrate >= 320:
@@ -757,9 +901,9 @@ def extract_track_number(filename):
 
 
 def build_destination(
-        artist,
-        title,
-        source_filename,
+    artist,
+    title,
+    source_filename,
 ):
     """
     Build:
@@ -768,8 +912,8 @@ def build_destination(
     """
 
     artist_dir = (
-            MUSIC_DIR
-            / sanitize_filename(artist)
+        MUSIC_DIR
+        / sanitize_filename(artist)
     )
 
     extension = _ext(
@@ -806,9 +950,6 @@ def build_destination(
 def snapshot_download_files():
     """
     Take a snapshot of files currently in the slskd completed directory.
-
-    slskd may preserve the remote directory hierarchy, so we search
-    recursively later.
     """
 
     if not DOWNLOAD_DIR.exists():
@@ -824,8 +965,6 @@ def snapshot_download_files():
 def queue_download(file):
     """
     Queue one Soulseek file through slskd.
-
-    The API expects a LIST of QueueDownloadRequest objects.
     """
 
     username = file.get(
@@ -882,8 +1021,6 @@ def queue_download(file):
 def _filename_matches(path, remote_filename):
     """
     Compare a completed local file against the requested remote filename.
-
-    slskd may transform path separators but should preserve the basename.
     """
 
     remote_basename = Path(
@@ -897,24 +1034,20 @@ def _filename_matches(path, remote_filename):
 
 
 def wait_for_download(
-        file,
-        previous_files,
-        timeout=DOWNLOAD_TIMEOUT,
+    file,
+    previous_files,
+    timeout=DOWNLOAD_TIMEOUT,
 ):
     """
-    Wait until the requested file appears in the completed download
-    directory.
-
-    We intentionally use the filesystem rather than relying on slskd's
-    transfer-state JSON.
+    Wait until the requested file appears in the completed directory.
     """
 
     remote_filename = file["filename"]
     expected_size = file.get("size")
 
     deadline = (
-            time.monotonic()
-            + timeout
+        time.monotonic()
+        + timeout
     )
 
     log.info(
@@ -937,8 +1070,8 @@ def wait_for_download(
                 continue
 
             if not _filename_matches(
-                    path,
-                    remote_filename,
+                path,
+                remote_filename,
             ):
                 continue
 
@@ -950,7 +1083,6 @@ def wait_for_download(
             except OSError:
                 continue
 
-            # If slskd gave us a size, use it as an additional guard.
             if expected_size and size != expected_size:
                 continue
 
@@ -974,16 +1106,15 @@ def wait_for_download(
 # ---------------------------------------------------------------------------
 
 def verify_downloaded_file(
-        path,
-        artist,
-        title,
+    path,
+    artist,
+    title,
 ):
     """
-    Verify that the downloaded audio file's metadata matches the
-    requested artist/title.
+    Verify downloaded audio metadata.
 
-    If metadata is unavailable, allow the file through because the
-    filename was already validated during Soulseek result selection.
+    Artist matching allows featured artists.
+    Title matching remains strict.
     """
 
     metadata = read_audio_metadata(
@@ -1000,29 +1131,34 @@ def verify_downloaded_file(
 
     actual_artist, actual_title = metadata
 
-    expected_artist = _normalise_metadata(
-        artist
-    )
-
-    expected_title = _normalise_metadata(
+    expected_title = _normalise_track_title(
         title
     )
 
-    if actual_artist != expected_artist:
+    actual_title_normalized = _normalise_track_title(
+        actual_title
+    )
+
+    if not _artist_matches(
+        artist,
+        actual_artist,
+    ):
         log.error(
-            "Downloaded artist mismatch: expected %r, got %r: %s",
-            expected_artist,
-            actual_artist,
+            "Downloaded artist mismatch: "
+            "expected %r, got %r: %s",
+            _normalise_artist_for_matching(artist),
+            _normalise_artist_for_matching(actual_artist),
             path,
         )
 
         return False
 
-    if actual_title != expected_title:
+    if actual_title_normalized != expected_title:
         log.error(
-            "Downloaded title mismatch: expected %r, got %r: %s",
+            "Downloaded title mismatch: "
+            "expected %r, got %r: %s",
             expected_title,
-            actual_title,
+            actual_title_normalized,
             path,
         )
 
@@ -1035,10 +1171,55 @@ def verify_downloaded_file(
 # Import
 # ---------------------------------------------------------------------------
 
+def ensure_directory_writable(directory):
+    """
+    Ensure the destination directory is group-writable.
+
+    This is intended for the shared `media` group used by Lidarr,
+    Soulbrainz and other music services.
+
+    We do NOT use chmod 777.
+
+    Existing Lidarr-created directories can be 0755, which means a
+    Soulbrainz process in the `media` group still cannot write there.
+    """
+
+    directory = Path(directory)
+
+    directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    try:
+        mode = directory.stat().st_mode
+    except OSError as exc:
+        raise RuntimeError(
+            f"Cannot stat destination directory {directory}: {exc}"
+        ) from exc
+
+    # Add group rwx while preserving existing owner/other permissions.
+    new_mode = mode | 0o070
+
+    # Setgid ensures children inherit the directory's group.
+    new_mode |= 0o2000
+
+    if new_mode != mode:
+        try:
+            directory.chmod(new_mode)
+        except PermissionError as exc:
+            raise PermissionError(
+                f"Cannot make music directory group-writable: "
+                f"{directory}. "
+                f"Make sure soulbrainz owns it or has sufficient "
+                f"permissions."
+            ) from exc
+
+
 def import_download(
-        source,
-        artist,
-        title,
+    source,
+    artist,
+    title,
 ):
     """
     Move the completed slskd download into the normalized music library.
@@ -1055,13 +1236,27 @@ def import_download(
         exist_ok=True,
     )
 
+    # -----------------------------------------------------------------------
+    # Fix for Lidarr-created 0755 directories.
+    #
+    # Example:
+    #
+    #   lidarr:media  drwxr-sr-x  Nothing But Thieves
+    #
+    # becomes group-writable so a media-group Soulbrainz process can import.
+    # -----------------------------------------------------------------------
+
+    ensure_directory_writable(
+        destination.parent
+    )
+
     if destination.exists():
         log.warning(
             "Destination already exists, skipping import: %s",
             destination,
         )
 
-        return False
+        return True
 
     log.info(
         "Importing: %s -> %s",
@@ -1089,8 +1284,8 @@ def cleanup_empty_parents(directory):
     directory = Path(directory)
 
     while (
-            directory != DOWNLOAD_DIR
-            and DOWNLOAD_DIR in directory.parents
+        directory != DOWNLOAD_DIR
+        and DOWNLOAD_DIR in directory.parents
     ):
         try:
             directory.rmdir()
@@ -1105,9 +1300,18 @@ def cleanup_empty_parents(directory):
 # ---------------------------------------------------------------------------
 
 def process_track(
-        track,
-        library_index,
+    track,
+    library_index,
 ):
+    """
+    Process one Weekly Jams track.
+
+    Returns:
+        "imported"
+        "skipped"
+        "failed"
+    """
+
     artist = track["artist"]
     title = track["title"]
 
@@ -1118,13 +1322,13 @@ def process_track(
     )
 
     # -----------------------------------------------------------------------
-    # 1. Check the actual music library first.
+    # 1. Check library.
     # -----------------------------------------------------------------------
 
     if track_exists(
-            library_index,
-            artist,
-            title,
+        library_index,
+        artist,
+        title,
     ):
         log.info(
             "Already in library, skipping: %s — %s",
@@ -1132,7 +1336,7 @@ def process_track(
             title,
         )
 
-        return False
+        return "skipped"
 
     # -----------------------------------------------------------------------
     # 2. Search Soulseek.
@@ -1150,7 +1354,7 @@ def process_track(
             title,
         )
 
-        return False
+        return "skipped"
 
     # -----------------------------------------------------------------------
     # 3. Select the best result.
@@ -1169,7 +1373,7 @@ def process_track(
             title,
         )
 
-        return False
+        return "skipped"
 
     log.info(
         "Selected: %s from %s",
@@ -1216,7 +1420,7 @@ def process_track(
     )
 
     # -----------------------------------------------------------------------
-    # 6. Wait for the actual file to appear.
+    # 6. Wait for download.
     # -----------------------------------------------------------------------
 
     try:
@@ -1225,48 +1429,62 @@ def process_track(
             previous_files,
         )
 
-        if not verify_downloaded_file(
-                completed_file,
-                artist,
-                title,
-        ):
-            log.error(
-                "Downloaded file failed metadata verification, "
-                "leaving it in the slskd completed directory: %s",
-                completed_file,
-            )
-
-            return False
-
     except TimeoutError as exc:
         log.error(
             "%s",
             exc,
         )
 
-        return False
+        return "failed"
 
     # -----------------------------------------------------------------------
-    # 7. Move it into /data/music/<Artist>/...
+    # 7. Verify downloaded file.
     # -----------------------------------------------------------------------
 
-    imported = import_download(
+    if not verify_downloaded_file(
         completed_file,
         artist,
         title,
-    )
+    ):
+        log.error(
+            "Downloaded file failed metadata verification, "
+            "leaving it in the slskd completed directory: %s",
+            completed_file,
+        )
+
+        return "failed"
+
+    # -----------------------------------------------------------------------
+    # 8. Import.
+    # -----------------------------------------------------------------------
+
+    try:
+        imported = import_download(
+            completed_file,
+            artist,
+            title,
+        )
+
+    except Exception:
+        log.exception(
+            "Failed importing %s — %s",
+            artist,
+            title,
+        )
+
+        return "failed"
 
     if imported:
-        # Update the in-memory index so that another Weekly Jams entry
-        # cannot cause a duplicate during this same execution.
         library_index.add(
             (
-                _normalise_metadata(artist),
-                _normalise_metadata(title),
+                _normalise_artist_for_matching(artist),
+                _normalise_track_title(title),
             )
         )
 
-    return imported
+        return "imported"
+
+    return "skipped"
 
 
 # ---------------------------------------------------------------------------
@@ -1279,7 +1497,7 @@ def main():
     )
 
     # -----------------------------------------------------------------------
-    # Build the library index once.
+    # Build library index.
     # -----------------------------------------------------------------------
 
     library_index = build_library_index()
@@ -1297,12 +1515,12 @@ def main():
 
         return
 
-    downloaded = 0
+    imported = 0
     skipped = 0
     failed = 0
 
     # -----------------------------------------------------------------------
-    # Process each recommendation.
+    # Process recommendations.
     # -----------------------------------------------------------------------
 
     for track in tracks:
@@ -1312,10 +1530,14 @@ def main():
                 library_index,
             )
 
-            if result:
-                downloaded += 1
-            else:
+            if result == "imported":
+                imported += 1
+
+            elif result == "skipped":
                 skipped += 1
+
+            elif result == "failed":
+                failed += 1
 
         except Exception:
             failed += 1
@@ -1332,7 +1554,7 @@ def main():
 
     log.info(
         "Finished: %d imported, %d skipped, %d failed",
-        downloaded,
+        imported,
         skipped,
         failed,
     )
