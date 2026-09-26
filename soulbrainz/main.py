@@ -829,7 +829,8 @@ def write_m3u(config: Config, weekly: WeeklyJams, paths: list[Path]) -> Path:
             for path in paths:
                 if not path.is_absolute() or "\n" in str(path) or "\r" in str(path):
                     raise ValueError(f"Invalid playlist path: {path}")
-                output_file.write(f"{path}\n")
+                relative_path = os.path.relpath(path, playlist_dir)
+                output_file.write(f"{relative_path}\n")
             output_file.flush()
             os.fsync(output_file.fileno())
 

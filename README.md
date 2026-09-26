@@ -39,13 +39,13 @@ bug triggered by Plex's standard preferences path. Set
 `environmentFile` when Plex is remote or uses a different account.
 
 The Plex token determines which account owns the resulting playlists, so it
-must be the account used in Plexamp. Plex must see the same absolute music paths
-written to the M3U8 files. On Nico, both services use `/data/music` and share the
-`media` group. Every writer of that tree must use the same group and a `0002`
-umask. By default, a privileged pre-start step adds group-write permission to
-music directories that are missing it; it never changes file contents or
-ownership. Set `repairDirectoryPermissions = false` if permissions are managed
-elsewhere.
+must be the account used in Plexamp. M3U8 entries are written relative to the
+playlist directory so Plex can resolve them on the server. On Nico, both
+services use `/data/music` and share the `media` group. Every writer of that tree
+must use the same group and a `0002` umask. By default, a privileged pre-start
+step adds group-write permission to music directories that are missing it; it
+never changes file contents or ownership. Set
+`repairDirectoryPermissions = false` if permissions are managed elsewhere.
 
 ```nix
 {

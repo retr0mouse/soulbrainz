@@ -425,19 +425,21 @@ def test_weekly_paths_preserve_order_and_remove_duplicate_files(tmp_path):
     assert main._weekly_paths(weekly, library) == [second, first]
 
 
-def test_write_m3u_uses_stable_weekly_path_and_utf8(tmp_path):
+def test_write_m3u_uses_stable_weekly_path_and_relative_utf8_paths(tmp_path):
     cfg = config(tmp_path, playlist_dir=tmp_path / "playlists")
     weekly = main.WeeklyJams(
         "weekly",
         date(2026, 2, 1),
         (main.Track("Beyoncé", "Halo"),),
     )
-    track = cfg.music_dir / "Beyoncé" / "Halo.flac"
+    track = cfg.music_dir / "Beyoncé Knowles" / "Halo.flac"
 
     playlist = main.write_m3u(cfg, weekly, [track])
 
     assert playlist == cfg.playlist_dir / "weekly-jams-2026-02-01.m3u8"
-    assert playlist.read_text(encoding="utf-8") == f"#EXTM3U\n{track}\n"
+    assert playlist.read_text(encoding="utf-8") == (
+        "#EXTM3U\n../music/Beyoncé Knowles/Halo.flac\n"
+    )
     assert playlist.stat().st_mode & 0o777 == 0o664
 
 
