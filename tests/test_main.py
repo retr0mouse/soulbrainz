@@ -443,7 +443,7 @@ def test_write_m3u_uses_stable_weekly_path_and_relative_utf8_paths(tmp_path):
     assert playlist.stat().st_mode & 0o777 == 0o664
 
 
-def test_publish_plex_playlist_scans_imports_renames_and_verifies(tmp_path):
+def test_publish_plex_playlist_creates_from_indexed_track_ids(tmp_path):
     cfg = config(
         tmp_path,
         plex_url="http://plex:32400",
@@ -458,17 +458,15 @@ def test_publish_plex_playlist_scans_imports_renames_and_verifies(tmp_path):
         (main.Track("A", "one"), main.Track("B", "two")),
     )
     paths = [cfg.music_dir / "A.flac", cfg.music_dir / "B.flac"]
-    m3u_path = cfg.playlist_dir / weekly.filename
     section = {
         "type": "artist",
         "title": "Music",
         "key": "4",
         "refreshing": False,
     }
-    imported = {
-        "guid": f"com.plexapp.agents.none://{m3u_path}",
+    created = {
         "key": "/playlists/42/items",
-        "title": "weekly-jams-2026-02-01",
+        "title": weekly.title,
         "leafCount": "2",
     }
     http = Mock()
@@ -479,13 +477,20 @@ def test_publish_plex_playlist_scans_imports_renames_and_verifies(tmp_path):
             {
                 "MediaContainer": {
                     "Metadata": [
-                        {"Media": [{"Part": [{"file": str(paths[0])}]}]},
-                        {"Media": [{"Part": [{"file": str(paths[1])}]}]},
+                        {
+                            "ratingKey": "10",
+                            "Media": [{"Part": [{"file": str(paths[0])}]}],
+                        },
+                        {
+                            "ratingKey": "20",
+                            "Media": [{"Part": [{"file": str(paths[1])}]}],
+                        },
                     ]
                 }
             }
         ),
-        Response({"MediaContainer": {"Metadata": [imported]}}),
+        Response({"MediaContainer": {"Metadata": []}}),
+        Response({"MediaContainer": {"machineIdentifier": "server-id"}}),
         Response(
             {
                 "MediaContainer": {
@@ -499,22 +504,27 @@ def test_publish_plex_playlist_scans_imports_renames_and_verifies(tmp_path):
     ]
     http.post.side_effect = [
         Response({}, headers={"X-Plex-Activity": "scan-activity"}),
-        Response({}),
+        Response({"MediaContainer": {"Metadata": [created]}}),
     ]
-    http.put.return_value = Response({})
 
     main.publish_plex_playlist(cfg, http, weekly, paths)
 
     assert http.post.call_args_list[0].args[0].endswith(
         "/library/sections/4/refresh"
     )
-    upload = http.post.call_args_list[1]
-    assert upload.args[0].endswith("/playlists/upload")
-    assert upload.kwargs["params"] == {"sectionID": "4", "path": str(m3u_path)}
-    rename = http.put.call_args
-    assert rename.args[0] == "http://plex:32400/playlists/42"
-    assert rename.kwargs["params"]["title.value"] == "Weekly Jams — 2026-02-01"
-    assert rename.kwargs["headers"]["X-Plex-Token"] == "token"
+    create = http.post.call_args_list[1]
+    assert create.args[0] == "http://plex:32400/playlists"
+    assert create.kwargs["params"] == {
+        "uri": (
+            "server://server-id/com.plexapp.plugins.library/"
+            "library/metadata/10,20"
+        ),
+        "type": "audio",
+        "title": "Weekly Jams — 2026-02-01",
+        "smart": 0,
+    }
+    http.put.assert_not_called()
+    http.delete.assert_not_called()
 
 
 def test_publish_plex_playlist_rejects_incomplete_import(tmp_path):
@@ -531,7 +541,6 @@ def test_publish_plex_playlist_rejects_incomplete_import(tmp_path):
         (main.Track("A", "one"), main.Track("B", "two")),
     )
     paths = [cfg.music_dir / "A.flac", cfg.music_dir / "B.flac"]
-    m3u_path = cfg.playlist_dir / weekly.filename
     section = {
         "type": "artist",
         "title": "Music",
@@ -546,26 +555,20 @@ def test_publish_plex_playlist_rejects_incomplete_import(tmp_path):
             {
                 "MediaContainer": {
                     "Metadata": [
-                        {"Media": [{"Part": [{"file": str(paths[0])}]}]},
-                        {"Media": [{"Part": [{"file": str(paths[1])}]}]},
-                    ]
-                }
-            }
-        ),
-        Response(
-            {
-                "MediaContainer": {
-                    "Metadata": [
                         {
-                            "guid": f"file://{m3u_path}",
-                            "ratingKey": "42",
-                            "title": weekly.title,
-                            "leafCount": 1,
-                        }
+                            "ratingKey": "10",
+                            "Media": [{"Part": [{"file": str(paths[0])}]}],
+                        },
+                        {
+                            "ratingKey": "20",
+                            "Media": [{"Part": [{"file": str(paths[1])}]}],
+                        },
                     ]
                 }
             }
         ),
+        Response({"MediaContainer": {"Metadata": []}}),
+        Response({"MediaContainer": {"machineIdentifier": "server-id"}}),
         Response(
             {
                 "MediaContainer": {
@@ -578,12 +581,22 @@ def test_publish_plex_playlist_rejects_incomplete_import(tmp_path):
     ]
     http.post.side_effect = [
         Response({}, headers={"X-Plex-Activity": "scan-activity"}),
-        Response({}),
+        Response(
+            {
+                "MediaContainer": {
+                    "Metadata": [
+                        {"ratingKey": "42", "title": weekly.title, "leafCount": 1}
+                    ]
+                }
+            }
+        ),
     ]
+    http.delete.return_value = Response({})
 
     with pytest.raises(RuntimeError, match="has 1 items but does not match"):
         main.publish_plex_playlist(cfg, http, weekly, paths)
 
+    http.delete.assert_called_once()
     http.put.assert_not_called()
 
 
@@ -603,7 +616,6 @@ def test_publish_plex_playlist_waits_for_same_week_overwrite(tmp_path):
     )
     paths = [cfg.music_dir / "A.flac", cfg.music_dir / "B.flac"]
     old_paths = [cfg.music_dir / "Old A.flac", cfg.music_dir / "Old B.flac"]
-    m3u_path = cfg.playlist_dir / weekly.filename
     section = {
         "type": "artist",
         "title": "Music",
@@ -611,7 +623,6 @@ def test_publish_plex_playlist_waits_for_same_week_overwrite(tmp_path):
         "refreshing": False,
     }
     playlist = {
-        "guid": f"file://{m3u_path}",
         "ratingKey": "42",
         "title": weekly.title,
         "leafCount": 2,
@@ -633,21 +644,52 @@ def test_publish_plex_playlist_waits_for_same_week_overwrite(tmp_path):
     http.get.side_effect = [
         Response({"MediaContainer": {"Directory": [section]}}),
         Response({"MediaContainer": {"Activity": []}}),
-        playlist_items(paths),
+        Response(
+            {
+                "MediaContainer": {
+                    "Metadata": [
+                        {
+                            "ratingKey": "10",
+                            "Media": [{"Part": [{"file": str(paths[0])}]}],
+                        },
+                        {
+                            "ratingKey": "20",
+                            "Media": [{"Part": [{"file": str(paths[1])}]}],
+                        },
+                    ]
+                }
+            }
+        ),
         Response({"MediaContainer": {"Metadata": [playlist]}}),
         playlist_items(old_paths),
-        Response({"MediaContainer": {"Metadata": [playlist]}}),
+        Response({"MediaContainer": {"machineIdentifier": "server-id"}}),
         playlist_items(paths),
     ]
     http.post.side_effect = [
         Response({}, headers={"X-Plex-Activity": "scan-activity"}),
-        Response({}),
+        Response(
+            {
+                "MediaContainer": {
+                    "Metadata": [
+                        {
+                            "ratingKey": "43",
+                            "title": f"{weekly.title} (updating)",
+                            "leafCount": 2,
+                        }
+                    ]
+                }
+            }
+        ),
     ]
+    http.delete.return_value = Response({})
+    http.put.return_value = Response({})
 
     main.publish_plex_playlist(cfg, http, weekly, paths)
 
-    http.put.assert_not_called()
-    assert http.get.call_count == 7
+    http.delete.assert_called_once()
+    assert http.delete.call_args.args[0] == "http://plex:32400/playlists/42"
+    assert http.put.call_args.args[0] == "http://plex:32400/playlists/43"
+    assert http.put.call_args.kwargs["params"]["title.value"] == weekly.title
 
 
 def test_refresh_plex_library_waits_for_scan_to_start_and_finish(tmp_path):
@@ -707,8 +749,11 @@ def test_wait_for_plex_tracks_waits_for_every_exact_path(tmp_path):
             {
                 "MediaContainer": {
                     "Metadata": [
-                        {"Media": [{"Part": [{"file": str(path)}]}]}
-                        for path in available
+                        {
+                            "ratingKey": str(index),
+                            "Media": [{"Part": [{"file": str(path)}]}],
+                        }
+                        for index, path in enumerate(available, start=1)
                     ]
                 }
             }
@@ -717,47 +762,10 @@ def test_wait_for_plex_tracks_waits_for_every_exact_path(tmp_path):
     http = Mock()
     http.get.side_effect = [tracks(paths[0]), tracks(*paths)]
 
-    main.wait_for_plex_tracks(cfg, http, "4", paths)
+    assert main.wait_for_plex_tracks(cfg, http, "4", paths) == ["1", "2"]
 
     assert http.get.call_count == 2
     assert http.get.call_args.kwargs["params"]["type"] == 10
-
-
-def test_find_plex_playlist_paginates(tmp_path):
-    cfg = config(
-        tmp_path,
-        plex_url="http://plex:32400",
-        plex_token="token",
-        plex_scan_timeout=0.1,
-    )
-    m3u_path = tmp_path / "weekly.m3u8"
-    wanted = {"guid": f"file://{m3u_path}", "ratingKey": "2"}
-    http = Mock()
-    http.get.side_effect = [
-        Response(
-            {
-                "MediaContainer": {
-                    "size": 1,
-                    "totalSize": 2,
-                    "Metadata": [{"guid": "file:///other.m3u8"}],
-                }
-            }
-        ),
-        Response(
-            {
-                "MediaContainer": {
-                    "size": 1,
-                    "totalSize": 2,
-                    "Metadata": [wanted],
-                }
-            }
-        ),
-    ]
-
-    assert main._find_plex_playlist(cfg, http, m3u_path, "4") == wanted
-    assert http.get.call_args_list[0].kwargs["params"]["X-Plex-Container-Start"] == 0
-    assert http.get.call_args_list[1].kwargs["params"]["X-Plex-Container-Start"] == 1
-
 
 def test_run_publishes_available_tracks_in_recommendation_order(tmp_path):
     cfg = config(tmp_path, plex_url="http://plex", plex_token="token")

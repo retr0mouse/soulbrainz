@@ -843,29 +843,6 @@ def write_m3u(config: Config, weekly: WeeklyJams, paths: list[Path]) -> Path:
     return destination
 
 
-def _find_plex_playlist(
-    config: Config,
-    http: requests.Session,
-    m3u_path: Path,
-    section_key: str,
-) -> dict[str, Any]:
-    deadline = time.monotonic() + min(config.plex_scan_timeout, 30)
-    while True:
-        playlists = _plex_collection(
-            config,
-            http,
-            "/playlists",
-            "Metadata",
-            {"playlistType": "audio", "sectionID": section_key},
-        )
-        for playlist in playlists:
-            if str(playlist.get("guid", "")).endswith(str(m3u_path)):
-                return playlist
-        if time.monotonic() >= deadline:
-            raise RuntimeError(f"Plex did not import playlist {m3u_path}")
-        time.sleep(config.poll_interval)
-
-
 def _plex_playlist_key(playlist: dict[str, Any]) -> str:
     key = str(playlist.get("key", "")).removesuffix("/items")
     if re.fullmatch(r"/playlists/\d+", key):
@@ -898,7 +875,7 @@ def wait_for_plex_tracks(
     http: requests.Session,
     section_key: str,
     paths: list[Path],
-) -> None:
+) -> list[str]:
     expected = {str(path) for path in paths}
     deadline = time.monotonic() + config.plex_scan_timeout
     missing = expected
@@ -910,16 +887,65 @@ def wait_for_plex_tracks(
             "Metadata",
             {"type": 10},
         )
-        indexed = set().union(*(_plex_item_files(track) for track in tracks))
-        missing = expected - indexed
+        indexed: dict[str, str] = {}
+        for track in tracks:
+            rating_key = str(track.get("ratingKey", ""))
+            if rating_key.isdigit():
+                for path in _plex_item_files(track):
+                    indexed[path] = rating_key
+        missing = expected - indexed.keys()
         if not missing:
-            return
+            return [indexed[str(path)] for path in paths]
         if time.monotonic() >= deadline:
             raise TimeoutError(
                 f"Plex did not index {len(missing)} of {len(expected)} playlist tracks "
                 f"within {config.plex_scan_timeout:g} seconds"
             )
         time.sleep(config.poll_interval)
+
+
+def _plex_machine_identifier(
+    config: Config,
+    http: requests.Session,
+) -> str:
+    response = http.get(
+        str(config.plex_url),
+        headers=_plex_headers(config),
+        timeout=20,
+    )
+    response.raise_for_status()
+    container = response.json().get("MediaContainer", {})
+    machine_identifier = (
+        container.get("machineIdentifier") if isinstance(container, dict) else None
+    )
+    if not machine_identifier:
+        raise RuntimeError("Plex did not return its machine identifier")
+    return str(machine_identifier)
+
+
+def _create_plex_playlist(
+    config: Config,
+    http: requests.Session,
+    title: str,
+    rating_keys: list[str],
+) -> dict[str, Any]:
+    machine_identifier = _plex_machine_identifier(config, http)
+    uri = (
+        f"server://{machine_identifier}/com.plexapp.plugins.library/"
+        f"library/metadata/{','.join(rating_keys)}"
+    )
+    response = http.post(
+        f"{config.plex_url}/playlists",
+        params={"uri": uri, "type": "audio", "title": title, "smart": 0},
+        headers=_plex_headers(config),
+        timeout=30,
+    )
+    response.raise_for_status()
+    playlists = _plex_objects(response, "Metadata")
+    if len(playlists) != 1:
+        raise RuntimeError("Plex did not return the created playlist")
+    _plex_playlist_key(playlists[0])
+    return playlists[0]
 
 
 def _plex_playlist_matches(
@@ -947,27 +973,20 @@ def publish_plex_playlist(
     weekly: WeeklyJams,
     paths: list[Path],
 ) -> None:
-    m3u_path = write_m3u(config, weekly, paths)
+    write_m3u(config, weekly, paths)
     section = _plex_music_section(config, http)
     section_key = str(section["key"])
     refresh_plex_library(config, http, section)
-    wait_for_plex_tracks(config, http, section_key, paths)
-
-    response = http.post(
-        f"{config.plex_url}/playlists/upload",
-        params={"sectionID": section_key, "path": str(m3u_path)},
-        headers=_plex_headers(config),
-        timeout=30,
+    rating_keys = wait_for_plex_tracks(config, http, section_key, paths)
+    playlists = _plex_collection(
+        config,
+        http,
+        "/playlists",
+        "Metadata",
+        {"playlistType": "audio", "sectionID": section_key},
     )
-    response.raise_for_status()
-    deadline = time.monotonic() + min(config.plex_scan_timeout, 30)
-    while True:
-        playlist = _find_plex_playlist(
-            config,
-            http,
-            m3u_path,
-            section_key,
-        )
+    existing = [playlist for playlist in playlists if playlist.get("title") == weekly.title]
+    for playlist in existing:
         playlist_key = _plex_playlist_key(playlist)
         matches, item_count = _plex_playlist_matches(
             config,
@@ -976,15 +995,49 @@ def publish_plex_playlist(
             paths,
         )
         if matches:
-            break
-        if time.monotonic() >= deadline:
+            log.info("Plex playlist %s is already current", weekly.title)
+            return
+        log.info("Replacing stale Plex playlist %s with %d items", weekly.title, item_count)
+
+    temporary_title = weekly.title if not existing else f"{weekly.title} (updating)"
+    playlist = _create_plex_playlist(
+        config,
+        http,
+        temporary_title,
+        rating_keys,
+    )
+    playlist_key = _plex_playlist_key(playlist)
+    try:
+        matches, item_count = _plex_playlist_matches(
+            config,
+            http,
+            playlist_key,
+            paths,
+        )
+        if not matches:
             raise RuntimeError(
                 f"Plex playlist has {item_count} items but does not match "
-                f"the {len(paths)} tracks in {m3u_path}"
+                f"the {len(paths)} requested tracks"
             )
-        time.sleep(config.poll_interval)
+    except Exception:
+        response = http.delete(
+            f"{config.plex_url}{playlist_key}",
+            headers=_plex_headers(config),
+            timeout=20,
+        )
+        response.raise_for_status()
+        raise
 
-    if playlist.get("title") != weekly.title:
+    for old_playlist in existing:
+        old_key = _plex_playlist_key(old_playlist)
+        response = http.delete(
+            f"{config.plex_url}{old_key}",
+            headers=_plex_headers(config),
+            timeout=20,
+        )
+        response.raise_for_status()
+
+    if existing:
         response = http.put(
             f"{config.plex_url}{playlist_key}",
             params={"title.value": weekly.title, "title.locked": 1},

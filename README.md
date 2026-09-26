@@ -7,10 +7,11 @@ download, and keeps earlier weekly playlists intact.
 
 Each run writes a stable file such as
 `/data/music/.playlists/weekly-jams-2026-09-21.m3u8`, refreshes the Plex music
-library, imports that file, and verifies the number of playlist entries. A rerun
-updates the same week; a new ListenBrainz week creates a new Plex playlist. The
-default timer checks daily so a late ListenBrainz publication or transient
-download failure is repaired without waiting another week.
+library, creates the Plex playlist directly from the indexed track IDs, and
+verifies every playlist entry. A rerun updates the same week; a new ListenBrainz
+week creates a new Plex playlist. The default timer checks daily so a late
+ListenBrainz publication or transient download failure is repaired without
+waiting another week.
 
 ## Configuration
 
