@@ -43,6 +43,7 @@
         };
         service = evaluated.config.systemd.services.soulbrainz;
         timer = evaluated.config.systemd.timers.soulbrainz;
+        tmpfiles = evaluated.config.systemd.tmpfiles.settings."10-soulbrainz";
         configured = lib.nixosSystem {
           inherit system;
           modules = [
@@ -66,8 +67,10 @@
           assert service.serviceConfig.UMask == "0002";
           assert lib.hasPrefix "+" service.serviceConfig.ExecStartPre;
           assert service.serviceConfig.LoadCredential == [
-            "plex-preferences:/var/lib/plex/Plex Media Server/Preferences.xml"
+            "plex-preferences:/run/soulbrainz-plex-preferences.xml"
           ];
+          assert tmpfiles."/run/soulbrainz-plex-preferences.xml".L.argument
+            == "/var/lib/plex/Plex Media Server/Preferences.xml";
           assert service.unitConfig.RequiresMountsFor == [
             "/data/music"
             "/data/downloads/slskd/complete"
@@ -98,6 +101,10 @@
         then "${cfg.musicDirectory}/.playlists"
         else cfg.playlistDirectory;
       localPlex = cfg.plexUrl != null && cfg.plexPreferencesFile != null;
+      # systemd 260 cannot deserialize LoadCredential source paths containing
+      # spaces. Keep its source path stable and space-free without copying the
+      # protected Plex preferences file.
+      plexCredentialSource = "/run/soulbrainz-plex-preferences.xml";
       fixDirectoryPermissions = pkgs.writeShellScript "soulbrainz-fix-directory-permissions" ''
         ${lib.getExe' pkgs.findutils "find"} ${lib.escapeShellArg cfg.musicDirectory} \
           -type d ! -perm -g+w \
@@ -203,6 +210,10 @@
           description = "Soulbrainz service user";
         };
 
+        systemd.tmpfiles.settings."10-soulbrainz" = lib.mkIf localPlex {
+          ${plexCredentialSource}.L.argument = cfg.plexPreferencesFile;
+        };
+
         systemd.services.soulbrainz = {
           description = "Import ListenBrainz Weekly Jams and publish them to Plex";
           after = ["network-online.target"] ++ lib.optional localPlex "plex.service";
@@ -237,7 +248,7 @@
             ExecStartPre = "+${fixDirectoryPermissions}";
           }
           // lib.optionalAttrs (cfg.plexUrl != null && cfg.plexPreferencesFile != null) {
-            LoadCredential = ["plex-preferences:${cfg.plexPreferencesFile}"];
+            LoadCredential = ["plex-preferences:${plexCredentialSource}"];
           }
           // lib.optionalAttrs (cfg.environmentFile != null) {
             EnvironmentFile = cfg.environmentFile;

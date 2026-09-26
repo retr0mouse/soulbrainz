@@ -33,7 +33,9 @@ service user/group, schedule, and package. Plex publishing is enabled by default
 for a server at `http://127.0.0.1:32400`. The module securely loads the existing
 Plex owner token from its protected preferences file with a systemd credential;
 the token is never placed in the Nix store, environment, process arguments, or
-logs. Set `plexPreferencesFile = null` and provide `PLEX_TOKEN` through
+logs. A space-free symlink under `/run` avoids a systemd 260 credential-loading
+bug triggered by Plex's standard preferences path. Set
+`plexPreferencesFile = null` and provide `PLEX_TOKEN` through
 `environmentFile` when Plex is remote or uses a different account.
 
 The Plex token determines which account owns the resulting playlists, so it
